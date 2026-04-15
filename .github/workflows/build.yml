@@ -1,0 +1,106 @@
+name: Reusable Skynet build
+
+on:
+  workflow_call:
+    inputs:
+      component:
+        description: "Image name (e.g. skynet-identity, skynet-base)"
+        required: true
+        type: string
+      context:
+        description: "Build context path"
+        default: "."
+        type: string
+      dockerfile:
+        description: "Path to Dockerfile relative to context"
+        default: "Dockerfile"
+        type: string
+      platforms:
+        description: "Comma-separated buildx platforms"
+        default: "linux/amd64,linux/arm64"
+        type: string
+      build-args:
+        description: "Extra --build-arg lines (KEY=VAL, one per line)"
+        default: ""
+        type: string
+      extra-tags:
+        description: "Extra tags to push (one per line, fully-qualified)"
+        default: ""
+        type: string
+      tag-latest:
+        description: "Push <component>:latest and <component>:py3.12 style rolling tag"
+        default: true
+        type: boolean
+      rolling-tag:
+        description: "Rolling tag value (e.g. 'latest' or 'py3.12'); defaults to 'latest'"
+        default: "latest"
+        type: string
+    secrets:
+      NEXUS_PASSWORD:
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64, k3s]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Set up buildx (remote, persistent daemon)
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: remote
+          endpoint: tcp://buildkitd.github-runner.svc:1234
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: nexus.nexus.svc:8083
+          username: admin
+          password: ${{ secrets.NEXUS_PASSWORD }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          set -euo pipefail
+          component='${{ inputs.component }}'
+          sha='${{ github.sha }}'
+          tags="nexus.nexus.svc:8083/${component}:${sha}
+          ghcr.io/sanscfs/${component}:${sha}"
+          if [ "${{ inputs.tag-latest }}" = "true" ]; then
+            rolling='${{ inputs.rolling-tag }}'
+            tags="${tags}
+          nexus.nexus.svc:8083/${component}:${rolling}
+          ghcr.io/sanscfs/${component}:${rolling}"
+          fi
+          extra='${{ inputs.extra-tags }}'
+          if [ -n "$extra" ]; then
+            tags="${tags}
+          ${extra}"
+          fi
+          {
+            echo 'tags<<EOF'
+            echo "$tags"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          build-args: ${{ inputs.build-args }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=registry,ref=nexus.nexus.svc:8083/${{ inputs.component }}:buildcache
+          cache-to:   type=registry,ref=nexus.nexus.svc:8083/${{ inputs.component }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+          push: true
