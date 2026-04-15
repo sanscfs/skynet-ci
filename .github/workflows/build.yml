@@ -71,7 +71,7 @@ jobs:
 
       - uses: docker/login-action@v3
         with:
-          registry: nexus.nexus.svc:8083
+          registry: docker-hosted.sanscfs.dev
           username: admin
           password: ${{ secrets.NEXUS_PASSWORD }}
 
@@ -81,12 +81,12 @@ jobs:
           set -euo pipefail
           component='${{ inputs.component }}'
           sha='${{ github.sha }}'
-          tags="nexus.nexus.svc:8083/${component}:${sha}
+          tags="docker-hosted.sanscfs.dev/${component}:${sha}
           ghcr.io/sanscfs/${component}:${sha}"
           if [ "${{ inputs.tag-latest }}" = "true" ]; then
             rolling='${{ inputs.rolling-tag }}'
             tags="${tags}
-          nexus.nexus.svc:8083/${component}:${rolling}
+          docker-hosted.sanscfs.dev/${component}:${rolling}
           ghcr.io/sanscfs/${component}:${rolling}"
           fi
           extra='${{ inputs.extra-tags }}'
@@ -107,8 +107,8 @@ jobs:
           platforms: ${{ inputs.platforms }}
           build-args: ${{ inputs.build-args }}
           tags: ${{ steps.tags.outputs.tags }}
-          cache-from: type=registry,ref=nexus.nexus.svc:8083/${{ inputs.component }}:buildcache
-          cache-to:   type=registry,ref=nexus.nexus.svc:8083/${{ inputs.component }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+          cache-from: type=registry,ref=docker-hosted.sanscfs.dev/${{ inputs.component }}:buildcache
+          cache-to:   type=registry,ref=docker-hosted.sanscfs.dev/${{ inputs.component }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
           push: true
 
   bump-infra:
