@@ -35,9 +35,15 @@ on:
         description: "Rolling tag value (e.g. 'latest' or 'py3.12'); defaults to 'latest'"
         default: "latest"
         type: string
+      bump-infra:
+        description: "After a successful build, commit the image SHA to sanscfs/infra (skynet-apps/ or infra-apps/ values.yaml + manifests/ deployments)."
+        default: true
+        type: boolean
     secrets:
       NEXUS_PASSWORD:
         required: true
+      INFRA_REPO_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -104,3 +110,44 @@ jobs:
           cache-from: type=registry,ref=nexus.nexus.svc:8083/${{ inputs.component }}:buildcache
           cache-to:   type=registry,ref=nexus.nexus.svc:8083/${{ inputs.component }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
           push: true
+
+  bump-infra:
+    if: ${{ inputs.bump-infra && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: build
+    runs-on: [self-hosted, linux, x64, k3s]
+    steps:
+      - name: Clone and update infra
+        env:
+          TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
+          COMPONENT: ${{ inputs.component }}
+          TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "INFRA_REPO_TOKEN not set — skipping bump." ; exit 0
+          fi
+          tmp=$(mktemp -d)
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/sanscfs/infra.git" "$tmp"
+          cd "$tmp"
+          git config user.name "Skynet CI"
+          git config user.email "skynet@sanscfs.dev"
+          updated=false
+          for values in "skynet-apps/${COMPONENT}/values.yaml" "infra-apps/${COMPONENT}/values.yaml"; do
+            if [ -f "$values" ]; then
+              sed -i "s|^\(  tag: \).*|\1\"${TAG}\"|" "$values"
+              updated=true
+            fi
+          done
+          kd="manifests/${COMPONENT}/deployment.yaml"
+          if [ -f "$kd" ]; then
+            sed -i "s|image:.*${COMPONENT}.*|image: ghcr.io/sanscfs/${COMPONENT}:${TAG}|" "$kd"
+            updated=true
+          fi
+          if [ "$updated" = "true" ]; then
+            git add -A
+            git diff --cached --quiet \
+              || git commit -m "ci(${COMPONENT}): update image to ${TAG}"
+            git push
+          else
+            echo "No matching values.yaml / deployment.yaml for ${COMPONENT}; skipping."
+          fi
