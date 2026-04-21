@@ -55,8 +55,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
-
       - name: Set up buildx (remote, persistent daemon)
         uses: docker/setup-buildx-action@v3
         with:
