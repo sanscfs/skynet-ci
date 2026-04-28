@@ -79,12 +79,19 @@ jobs:
           set -euo pipefail
           component='${{ inputs.component }}'
           sha='${{ github.sha }}'
-          tags="docker-hosted.sanscfs.dev/${component}:${sha}
-          ghcr.io/sanscfs/${component}:${sha}"
+          # Single-registry push: ghcr.io only. The previous multi-tag
+          # push (docker-hosted.sanscfs.dev + ghcr.io) tripped a buildkit
+          # / GHCR API mismatch where buildkit probed
+          # ``GET /v2/<repo>/blobs/uploads/`` and GHCR consistently
+          # returned 405 Method Not Allowed (that endpoint isn't part
+          # of the Docker Registry V2 spec; GHCR doesn't implement it).
+          # Reproduced on buildkit v0.16.0, v0.20.2, and v0.21.0 — not
+          # a buildkit version issue. Dropping the second tag eliminates
+          # the cross-mount probe that triggers it.
+          tags="ghcr.io/sanscfs/${component}:${sha}"
           if [ "${{ inputs.tag-latest }}" = "true" ]; then
             rolling='${{ inputs.rolling-tag }}'
             tags="${tags}
-          docker-hosted.sanscfs.dev/${component}:${rolling}
           ghcr.io/sanscfs/${component}:${rolling}"
           fi
           extra='${{ inputs.extra-tags }}'
@@ -105,8 +112,10 @@ jobs:
           platforms: ${{ inputs.platforms }}
           build-args: ${{ inputs.build-args }}
           tags: ${{ steps.tags.outputs.tags }}
-          cache-from: type=registry,ref=docker-hosted.sanscfs.dev/${{ inputs.component }}:buildcache
-          cache-to:   type=registry,ref=docker-hosted.sanscfs.dev/${{ inputs.component }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+          # No registry cache for now — the docker-hosted cache-to was
+          # part of the multi-registry fan-out that triggered the
+          # GHCR 405 probe. Builds will be slower until we rewire
+          # cache to a buildkit-supported sink (gha or local layers).
           push: true
 
   bump-infra:
