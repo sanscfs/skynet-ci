@@ -55,11 +55,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up buildx (remote, persistent daemon)
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver: remote
-          endpoint: tcp://buildkitd.github-runner.svc:1234
+      # Build & push via the runner's dind sidecar — bypassing remote
+      # buildkit entirely. buildkit's push pipeline trips a GHCR API
+      # mismatch we couldn't shake (``GET /v2/<repo>/blobs/uploads/``
+      # → 405 Method Not Allowed across buildkit v0.16.0, v0.20.2,
+      # v0.21.0 and build-push-action v5/v6). Plain ``docker build``
+      # uses the OCI v2 spec endpoints GHCR actually implements
+      # (``POST /v2/.../blobs/uploads/`` to start, ``PUT
+      # ?digest=...`` to finalize) and pushes successfully.
+      #
+      # Cost: no multi-arch (Buildx is what gives us that). Acceptable
+      # because every Skynet component currently builds linux/amd64
+      # only — the inputs.platforms knob defaults to that and nobody
+      # overrides it.
 
       - uses: docker/login-action@v3
         with:
@@ -67,56 +75,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/login-action@v3
-        with:
-          registry: docker-hosted.sanscfs.dev
-          username: admin
-          password: ${{ secrets.NEXUS_PASSWORD }}
-
-      - name: Compute tags
-        id: tags
+      - name: Build & push (dind, no buildkit)
+        env:
+          COMPONENT: ${{ inputs.component }}
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+          SHA: ${{ github.sha }}
+          ROLLING: ${{ inputs.rolling-tag }}
+          TAG_LATEST: ${{ inputs.tag-latest }}
+          EXTRA_TAGS: ${{ inputs.extra-tags }}
         run: |
           set -euo pipefail
-          component='${{ inputs.component }}'
-          sha='${{ github.sha }}'
-          # Single-registry push: ghcr.io only. The previous multi-tag
-          # push (docker-hosted.sanscfs.dev + ghcr.io) tripped a buildkit
-          # / GHCR API mismatch where buildkit probed
-          # ``GET /v2/<repo>/blobs/uploads/`` and GHCR consistently
-          # returned 405 Method Not Allowed (that endpoint isn't part
-          # of the Docker Registry V2 spec; GHCR doesn't implement it).
-          # Reproduced on buildkit v0.16.0, v0.20.2, and v0.21.0 — not
-          # a buildkit version issue. Dropping the second tag eliminates
-          # the cross-mount probe that triggers it.
-          tags="ghcr.io/sanscfs/${component}:${sha}"
-          if [ "${{ inputs.tag-latest }}" = "true" ]; then
-            rolling='${{ inputs.rolling-tag }}'
-            tags="${tags}
-          ghcr.io/sanscfs/${component}:${rolling}"
-          fi
-          extra='${{ inputs.extra-tags }}'
-          if [ -n "$extra" ]; then
-            tags="${tags}
-          ${extra}"
-          fi
-          {
-            echo 'tags<<EOF'
-            echo "$tags"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
+          primary="ghcr.io/sanscfs/${COMPONENT}:${SHA}"
 
-      - uses: docker/build-push-action@v5
-        with:
-          context: ${{ inputs.context }}
-          file: ${{ inputs.context }}/${{ inputs.dockerfile }}
-          platforms: ${{ inputs.platforms }}
-          build-args: ${{ inputs.build-args }}
-          tags: ${{ steps.tags.outputs.tags }}
-          # No registry cache for now — the docker-hosted cache-to was
-          # part of the multi-registry fan-out that triggered the
-          # GHCR 405 probe. Builds will be slower until we rewire
-          # cache to a buildkit-supported sink (gha or local layers).
-          push: true
+          # Build args: each line "KEY=VAL" -> "--build-arg KEY=VAL"
+          ba=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && ba+=("--build-arg" "$line")
+          done <<< "${BUILD_ARGS:-}"
+
+          docker build \
+            -f "${CONTEXT}/${DOCKERFILE}" \
+            -t "${primary}" \
+            "${ba[@]}" \
+            "${CONTEXT}"
+
+          docker push "${primary}"
+
+          # Optional rolling tag (latest / py3.12 / etc.)
+          if [ "${TAG_LATEST}" = "true" ]; then
+            rolling_tag="ghcr.io/sanscfs/${COMPONENT}:${ROLLING}"
+            docker tag "${primary}" "${rolling_tag}"
+            docker push "${rolling_tag}"
+          fi
+
+          # Optional extra tags from inputs
+          if [ -n "${EXTRA_TAGS:-}" ]; then
+            while IFS= read -r tag; do
+              [ -z "$tag" ] && continue
+              docker tag "${primary}" "$tag"
+              docker push "$tag"
+            done <<< "${EXTRA_TAGS}"
+          fi
 
   bump-infra:
     if: ${{ inputs.bump-infra && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
